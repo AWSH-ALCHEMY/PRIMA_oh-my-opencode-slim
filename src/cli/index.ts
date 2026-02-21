@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { install } from './install';
+import { verifyAgentsCommand } from './verify-agents';
 import type { BooleanArg, InstallArgs } from './types';
 
 function parseArgs(args: string[]): InstallArgs {
@@ -57,6 +58,12 @@ oh-my-opencode-slim installer
 
 Usage: bunx oh-my-opencode-slim install [OPTIONS]
        bunx oh-my-opencode-slim models [OPTIONS]
+       bunx oh-my-opencode-slim verify-agents
+
+Commands:
+  install                Run the interactive installer
+  models                 Update model assignments only
+  verify-agents          Display current agent-to-model mappings
 
 Options:
   --kimi=yes|no          Kimi API access (yes/no)
@@ -81,6 +88,7 @@ Options:
 Examples:
   bunx oh-my-opencode-slim install
   bunx oh-my-opencode-slim models
+  bunx oh-my-opencode-slim verify-agents
   bunx oh-my-opencode-slim install --no-tui --kimi=yes --openai=yes --anthropic=yes --copilot=no --zai-plan=no --antigravity=yes --chutes=no --opencode-free=yes --balanced-spend=yes --opencode-free-model=auto --aa-key=YOUR_AA_KEY --openrouter-key=YOUR_OR_KEY --tmux=no --skills=yes
 `);
 }
@@ -96,6 +104,9 @@ async function main(): Promise<void> {
     }
     const exitCode = await install(installArgs);
     process.exit(exitCode);
+  } else if (args[0] === 'verify-agents') {
+    verifyAgentsCommand();
+    process.exit(0);
   } else if (args[0] === '-h' || args[0] === '--help') {
     printHelp();
     process.exit(0);
