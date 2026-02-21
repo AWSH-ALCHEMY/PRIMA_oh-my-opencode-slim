@@ -15,6 +15,14 @@ type AgentName = (typeof AGENT_NAMES)[number];
 
 // Model mappings by provider priority
 export const MODEL_MAPPINGS = {
+  CrofAI: {
+    orchestrator: { model: 'CrofAI/glm-5' },
+    oracle: { model: 'CrofAI/kimi-k2.5', variant: 'high' },
+    librarian: { model: 'CrofAI/kimi-k2.5-instant', variant: 'low' },
+    explorer: { model: 'CrofAI/kimi-k2.5-instant', variant: 'low' },
+    designer: { model: 'CrofAI/deepseek-v3.2', variant: 'medium' },
+    fixer: { model: 'CrofAI/deepseek-v3.2', variant: 'low' },
+  },
   kimi: {
     orchestrator: { model: 'kimi-for-coding/k2p5' },
     oracle: { model: 'kimi-for-coding/k2p5', variant: 'high' },
