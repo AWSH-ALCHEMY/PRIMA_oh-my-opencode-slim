@@ -22,11 +22,17 @@ interface ManagedClient {
   isInitializing: boolean;
 }
 
-class LSPServerManager {
+export class LSPServerManager {
   private static instance: LSPServerManager;
   private clients = new Map<string, ManagedClient>();
   private cleanupInterval: ReturnType<typeof setInterval> | null = null;
   private readonly IDLE_TIMEOUT = 5 * 60 * 1000;
+
+  // Store handler references for cleanup
+  private exitHandler: (() => void) | null = null;
+  private sigintHandler: (() => void) | null = null;
+  private sigtermHandler: (() => void) | null = null;
+  private isCleanedUp = false;
 
   private constructor() {
     this.startCleanupTimer();
@@ -34,6 +40,9 @@ class LSPServerManager {
   }
 
   private registerProcessCleanup(): void {
+    // Prevent double registration
+    if (this.isCleanedUp) return;
+
     const cleanup = () => {
       for (const [, managed] of this.clients) {
         try {
@@ -47,15 +56,66 @@ class LSPServerManager {
       }
     };
 
-    process.on('exit', cleanup);
-    process.on('SIGINT', () => {
+    this.exitHandler = cleanup;
+    this.sigintHandler = () => {
       cleanup();
       process.exit(0);
-    });
-    process.on('SIGTERM', () => {
+    };
+    this.sigtermHandler = () => {
       cleanup();
       process.exit(0);
-    });
+    };
+
+    process.on('exit', this.exitHandler);
+    process.on('SIGINT', this.sigintHandler);
+    process.on('SIGTERM', this.sigtermHandler);
+  }
+
+  /**
+   * Dispose of the manager, removing all event handlers and cleaning up resources.
+   * Safe to call multiple times.
+   */
+  dispose(): void {
+    if (this.isCleanedUp) return;
+    this.isCleanedUp = true;
+
+    // Remove event handlers
+    if (this.exitHandler) {
+      process.removeListener('exit', this.exitHandler);
+      this.exitHandler = null;
+    }
+    if (this.sigintHandler) {
+      process.removeListener('SIGINT', this.sigintHandler);
+      this.sigintHandler = null;
+    }
+    if (this.sigtermHandler) {
+      process.removeListener('SIGTERM', this.sigtermHandler);
+      this.sigtermHandler = null;
+    }
+
+    // Clear interval
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
+
+    // Stop all clients
+    for (const [, managed] of this.clients) {
+      try {
+        managed.client.stop();
+      } catch {}
+    }
+    this.clients.clear();
+  }
+
+  /**
+   * Reset the singleton instance. Used for testing and cleanup.
+   */
+  static resetInstance(): void {
+    if (LSPServerManager.instance) {
+      LSPServerManager.instance.dispose();
+      LSPServerManager.instance = undefined as unknown as LSPServerManager;
+    }
   }
 
   static getInstance(): LSPServerManager {
@@ -163,6 +223,14 @@ class LSPServerManager {
 }
 
 export const lspManager = LSPServerManager.getInstance();
+
+/**
+ * Dispose of the LSP manager singleton.
+ * Useful for cleanup during testing or when the plugin is unloaded.
+ */
+export function disposeLspManager(): void {
+  LSPServerManager.resetInstance();
+}
 
 export class LSPClient {
   private proc: Subprocess<'pipe', 'pipe', 'pipe'> | null = null;
