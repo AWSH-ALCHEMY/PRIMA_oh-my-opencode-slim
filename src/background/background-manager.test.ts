@@ -1505,4 +1505,148 @@ describe('BackgroundTaskManager', () => {
       ]);
     });
   });
+
+  describe('status transitions', () => {
+    test('allows valid transition from pending to starting', async () => {
+      const ctx = createMockContext();
+      const manager = new BackgroundTaskManager(ctx);
+      const task = manager.launch({
+        agent: 'test',
+        prompt: 'test',
+        description: 'test',
+        parentSessionId: 'parent',
+      });
+
+      // Task may be pending or starting depending on async timing
+      expect(['pending', 'starting']).toContain(task.status);
+
+      // Wait for task to be in starting state
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // After async processing, task should be starting or running
+      expect(['starting', 'running']).toContain(task.status);
+    });
+
+    test('rejects invalid transition from pending to running', () => {
+      const ctx = createMockContext();
+      const manager = new BackgroundTaskManager(ctx);
+      const task = manager.launch({
+        agent: 'test',
+        prompt: 'test',
+        description: 'test',
+        parentSessionId: 'parent',
+      });
+
+      // Manually set back to pending for testing
+      task.status = 'pending';
+
+      // pending -> running is invalid (must go through starting)
+      const result = (manager as any).tryTransitionStatus(task, 'running');
+      expect(result).toBe(false);
+      expect(task.status).toBe('pending');
+    });
+
+    test('prevents transitions from terminal states', () => {
+      const ctx = createMockContext();
+      const manager = new BackgroundTaskManager(ctx);
+      const task = manager.launch({
+        agent: 'test',
+        prompt: 'test',
+        description: 'test',
+        parentSessionId: 'parent',
+      });
+
+      // Set to completed (terminal state)
+      task.status = 'completed';
+
+      // Try to transition from completed
+      const result = (manager as any).tryTransitionStatus(task, 'failed');
+      expect(result).toBe(false);
+      expect(task.status).toBe('completed');
+    });
+
+    test('allows transition to cancelled from active states', () => {
+      const ctx = createMockContext();
+      const manager = new BackgroundTaskManager(ctx);
+
+      // Test from pending
+      const task1 = manager.launch({
+        agent: 'test',
+        prompt: 'test',
+        description: 'test',
+        parentSessionId: 'parent',
+      });
+      task1.status = 'pending';
+      expect((manager as any).tryTransitionStatus(task1, 'cancelled')).toBe(
+        true,
+      );
+
+      // Test from starting
+      const task2 = manager.launch({
+        agent: 'test',
+        prompt: 'test',
+        description: 'test',
+        parentSessionId: 'parent',
+      });
+      task2.status = 'starting';
+      expect((manager as any).tryTransitionStatus(task2, 'cancelled')).toBe(
+        true,
+      );
+
+      // Test from running
+      const task3 = manager.launch({
+        agent: 'test',
+        prompt: 'test',
+        description: 'test',
+        parentSessionId: 'parent',
+      });
+      task3.status = 'running';
+      expect((manager as any).tryTransitionStatus(task3, 'cancelled')).toBe(
+        true,
+      );
+    });
+
+    test('cancel uses atomic status transitions', async () => {
+      const ctx = createMockContext();
+      const manager = new BackgroundTaskManager(ctx);
+      const task = manager.launch({
+        agent: 'test',
+        prompt: 'test',
+        description: 'test',
+        parentSessionId: 'parent',
+      });
+
+      // Task may be pending or starting
+      expect(['pending', 'starting']).toContain(task.status);
+
+      manager.cancel(task.id);
+
+      expect(task.status).toBe('cancelled');
+      expect(task.completedAt).toBeInstanceOf(Date);
+    });
+
+    test('cancel is idempotent', async () => {
+      const ctx = createMockContext();
+      const manager = new BackgroundTaskManager(ctx);
+      const task = manager.launch({
+        agent: 'test',
+        prompt: 'test',
+        description: 'test',
+        parentSessionId: 'parent',
+      });
+
+      // Wait for task to be in a known state
+      await Promise.resolve();
+
+      // First cancel
+      const count1 = manager.cancel(task.id);
+      expect(count1).toBe(1);
+      expect(task.status).toBe('cancelled');
+
+      // Second cancel should return 0 (already cancelled)
+      const count2 = manager.cancel(task.id);
+      expect(count2).toBe(0);
+    });
+  });
 });
