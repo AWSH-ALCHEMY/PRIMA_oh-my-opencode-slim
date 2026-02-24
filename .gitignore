@@ -51,6 +51,7 @@ oh-my-opencode
 
 # Planning docs (not for commit)
 TIMEOUT_PLAN.md
+improvements/
 
 # Python
 __pycache__/
