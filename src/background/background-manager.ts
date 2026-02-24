@@ -90,6 +90,18 @@ function generateTaskId(): string {
   return `bg_${Math.random().toString(36).substring(2, 10)}`;
 }
 
+// Define valid status transitions for atomic state changes
+type TaskStatus = BackgroundTask['status'];
+
+const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
+  pending: ['starting', 'cancelled'],
+  starting: ['running', 'cancelled', 'failed'],
+  running: ['completed', 'failed', 'cancelled'],
+  completed: [], // Terminal state
+  failed: [], // Terminal state
+  cancelled: [], // Terminal state
+};
+
 export class BackgroundTaskManager {
   private tasks = new Map<string, BackgroundTask>();
   private tasksBySessionId = new Map<string, string>();
@@ -125,6 +137,32 @@ export class BackgroundTaskManager {
       maxConcurrentStarts: 10,
     };
     this.maxConcurrentStarts = this.backgroundConfig.maxConcurrentStarts;
+  }
+
+  /**
+   * Atomically attempt to transition task status.
+   * Returns true if transition was successful, false if invalid.
+   * This prevents race conditions where multiple code paths try to modify status.
+   */
+  private tryTransitionStatus(
+    task: BackgroundTask,
+    newStatus: TaskStatus,
+  ): boolean {
+    const currentStatus = task.status;
+    const validNextStates = VALID_TRANSITIONS[currentStatus];
+
+    if (!validNextStates?.includes(newStatus)) {
+      log(
+        `[background-manager] Invalid status transition: ${currentStatus} -> ${newStatus}`,
+        {
+          taskId: task.id,
+        },
+      );
+      return false;
+    }
+
+    task.status = newStatus;
+    return true;
   }
 
   /**
@@ -299,15 +337,13 @@ export class BackgroundTaskManager {
    * Start a task in the background (Phase B).
    */
   private async startTask(task: BackgroundTask): Promise<void> {
-    task.status = 'starting';
-    this.activeStarts++;
-
-    // Check if cancelled after incrementing activeStarts (to catch race)
-    // Use type assertion since cancel() can change status during race condition
-    if ((task as BackgroundTask & { status: string }).status === 'cancelled') {
-      this.completeTask(task, 'cancelled', 'Task cancelled before start');
+    // Atomically transition from pending to starting
+    if (!this.tryTransitionStatus(task, 'starting')) {
+      // Task was already cancelled or in invalid state
       return;
     }
+
+    this.activeStarts++;
 
     try {
       // Create session
@@ -327,7 +363,18 @@ export class BackgroundTaskManager {
       this.tasksBySessionId.set(session.data.id, task.id);
       // Track the agent type for this session for delegation checks
       this.agentBySessionId.set(session.data.id, task.agent);
-      task.status = 'running';
+
+      // Atomically transition from starting to running
+      if (!this.tryTransitionStatus(task, 'running')) {
+        // Task was cancelled during startup - clean up
+        this.client.session
+          .abort({ path: { id: session.data.id } })
+          .catch(() => {});
+        this.tasksBySessionId.delete(session.data.id);
+        this.agentBySessionId.delete(session.data.id);
+        this.completeTask(task, 'cancelled', 'Task cancelled during startup');
+        return;
+      }
 
       // Give TmuxSessionManager time to spawn the pane
       if (this.tmuxEnabled) {
@@ -455,30 +502,30 @@ export class BackgroundTaskManager {
     const task = this.tasks.get(taskId);
     if (!task) return;
 
-    // Only handle if task is still active
-    if (task.status === 'running' || task.status === 'pending') {
-      log(`[background-manager] Session deleted, cancelling task: ${task.id}`);
-
-      // Mark as cancelled
-      (task as BackgroundTask & { status: string }).status = 'cancelled';
-      task.completedAt = new Date();
-      task.error = 'Session deleted';
-
-      // Clean up session tracking
-      this.tasksBySessionId.delete(sessionId);
-      this.agentBySessionId.delete(sessionId);
-
-      // Resolve any waiting callers
-      const resolver = this.completionResolvers.get(taskId);
-      if (resolver) {
-        resolver(task);
-        this.completionResolvers.delete(taskId);
-      }
-
-      log(
-        `[background-manager] Task cancelled due to session deletion: ${task.id}`,
-      );
+    // Atomically transition to cancelled
+    if (!this.tryTransitionStatus(task, 'cancelled')) {
+      return; // Already in terminal state
     }
+
+    log(`[background-manager] Session deleted, cancelling task: ${task.id}`);
+
+    task.completedAt = new Date();
+    task.error = 'Session deleted';
+
+    // Clean up session tracking
+    this.tasksBySessionId.delete(sessionId);
+    this.agentBySessionId.delete(sessionId);
+
+    // Resolve any waiting callers
+    const resolver = this.completionResolvers.get(taskId);
+    if (resolver) {
+      resolver(task);
+      this.completionResolvers.delete(taskId);
+    }
+
+    log(
+      `[background-manager] Task cancelled due to session deletion: ${task.id}`,
+    );
   }
 
   /**
@@ -537,18 +584,30 @@ export class BackgroundTaskManager {
     status: 'completed' | 'failed' | 'cancelled',
     resultOrError: string,
   ): void {
-    // Don't check for 'cancelled' here - cancel() may set status before calling
-    if (task.status === 'completed' || task.status === 'failed') {
-      return; // Already completed
+    // Use atomic transition - this handles terminal state check
+    // Note: If task is already in the target status (e.g., cancelled by cancel()),
+    // the transition will fail but we still need to do cleanup
+    const alreadyInTargetStatus = task.status === status;
+    const transitionSucceeded = this.tryTransitionStatus(task, status);
+
+    if (!transitionSucceeded && !alreadyInTargetStatus) {
+      log(`[background-manager] Cannot complete task in state ${task.status}`, {
+        taskId: task.id,
+        attemptedStatus: status,
+      });
+      return;
     }
 
-    task.status = status;
-    task.completedAt = new Date();
+    // Only set completedAt and result/error if this is a new transition
+    // or if the task is already in the target status (e.g., cancelled by cancel())
+    if (transitionSucceeded || alreadyInTargetStatus) {
+      task.completedAt = new Date();
 
-    if (status === 'completed') {
-      task.result = resultOrError;
-    } else {
-      task.error = resultOrError;
+      if (status === 'completed') {
+        task.result = resultOrError;
+      } else {
+        task.error = resultOrError;
+      }
     }
 
     // Clean up session tracking maps as fallback
@@ -659,59 +718,36 @@ export class BackgroundTaskManager {
   cancel(taskId?: string): number {
     if (taskId) {
       const task = this.tasks.get(taskId);
-      if (
-        task &&
-        (task.status === 'pending' ||
-          task.status === 'starting' ||
-          task.status === 'running')
-      ) {
-        // Clean up any waiting resolver
-        this.completionResolvers.delete(taskId);
+      if (!task) return 0;
 
-        // Check if in start queue (must check before marking cancelled)
-        const inStartQueue = task.status === 'pending';
-
-        // Mark as cancelled FIRST to prevent race with startTask
-        // Use type assertion since we're deliberately changing status before completeTask
-        (task as BackgroundTask & { status: string }).status = 'cancelled';
-
-        // Remove from start queue if pending
-        if (inStartQueue) {
-          const idx = this.startQueue.findIndex((t) => t.id === taskId);
-          if (idx >= 0) {
-            this.startQueue.splice(idx, 1);
-          }
-        }
-
-        this.completeTask(task, 'cancelled', 'Cancelled by user');
-        return 1;
+      // Atomically transition to cancelled
+      if (!this.tryTransitionStatus(task, 'cancelled')) {
+        return 0; // Already in terminal state
       }
-      return 0;
+
+      // Clean up resolver
+      this.completionResolvers.delete(taskId);
+
+      // Remove from start queue if pending
+      const idx = this.startQueue.findIndex((t) => t.id === taskId);
+      if (idx >= 0) {
+        this.startQueue.splice(idx, 1);
+      }
+
+      // Complete the task
+      this.completeTask(task, 'cancelled', 'Cancelled by user');
+      return 1;
     }
 
+    // Cancel all
     let count = 0;
     for (const task of this.tasks.values()) {
-      if (
-        task.status === 'pending' ||
-        task.status === 'starting' ||
-        task.status === 'running'
-      ) {
-        // Clean up any waiting resolver
+      if (this.tryTransitionStatus(task, 'cancelled')) {
         this.completionResolvers.delete(task.id);
 
-        // Check if in start queue (must check before marking cancelled)
-        const inStartQueue = task.status === 'pending';
-
-        // Mark as cancelled FIRST to prevent race with startTask
-        // Use type assertion since we're deliberately changing status before completeTask
-        (task as BackgroundTask & { status: string }).status = 'cancelled';
-
-        // Remove from start queue if pending
-        if (inStartQueue) {
-          const idx = this.startQueue.findIndex((t) => t.id === task.id);
-          if (idx >= 0) {
-            this.startQueue.splice(idx, 1);
-          }
+        const idx = this.startQueue.findIndex((t) => t.id === task.id);
+        if (idx >= 0) {
+          this.startQueue.splice(idx, 1);
         }
 
         this.completeTask(task, 'cancelled', 'Cancelled by user');
