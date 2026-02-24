@@ -30,7 +30,12 @@ mock.module('bun', () => ({
   }),
 }));
 
-import { LSPClient, lspManager } from './client';
+import {
+  disposeLspManager,
+  LSPClient,
+  LSPServerManager,
+  lspManager,
+} from './client';
 
 describe('LSPServerManager', () => {
   let startSpy: any;
@@ -137,12 +142,113 @@ describe('LSPServerManager', () => {
     // Since it's a singleton, we can just check if it was called during init
     // But it already happened. Let's check if the handlers are there.
     // Actually, we can just verify that it's intended to be called.
-
     // For the sake of this test, let's just see if process.on was called with expected events
     // This might be tricky if it happened before we started spying.
 
     // Instead, let's just verify that stopAll is exported and works, which we already did.
     expect(onSpy).toBeDefined();
     onSpy.mockRestore();
+  });
+});
+
+describe('LSPServerManager event handler management', () => {
+  // Store initial listener counts
+  let initialExitListeners: number;
+  let initialSigintListeners: number;
+  let initialSigtermListeners: number;
+
+  beforeEach(async () => {
+    // Record initial listener counts
+    initialExitListeners = process.listenerCount('exit');
+    initialSigintListeners = process.listenerCount('SIGINT');
+    initialSigtermListeners = process.listenerCount('SIGTERM');
+
+    // Reset singleton before each test
+    disposeLspManager();
+  });
+
+  afterEach(() => {
+    // Clean up after each test
+    disposeLspManager();
+  });
+
+  test('should not accumulate event handlers on multiple getInstance calls', () => {
+    // Get instance multiple times (simulating hot-reload)
+    LSPServerManager.getInstance();
+    const afterFirstExit = process.listenerCount('exit');
+    const afterFirstSigint = process.listenerCount('SIGINT');
+    const afterFirstSigterm = process.listenerCount('SIGTERM');
+
+    LSPServerManager.getInstance();
+    LSPServerManager.getInstance();
+
+    // Handler count should not increase after first getInstance
+    expect(process.listenerCount('exit')).toBe(afterFirstExit);
+    expect(process.listenerCount('SIGINT')).toBe(afterFirstSigint);
+    expect(process.listenerCount('SIGTERM')).toBe(afterFirstSigterm);
+  });
+
+  test('should properly register handlers on first getInstance', () => {
+    // Get instance
+    LSPServerManager.getInstance();
+
+    // Should have added exactly one handler for each event
+    expect(process.listenerCount('exit')).toBe(initialExitListeners + 1);
+    expect(process.listenerCount('SIGINT')).toBe(initialSigintListeners + 1);
+    expect(process.listenerCount('SIGTERM')).toBe(initialSigtermListeners + 1);
+  });
+
+  test('should properly remove handlers on dispose', () => {
+    // Get instance
+    LSPServerManager.getInstance();
+    expect(process.listenerCount('exit')).toBe(initialExitListeners + 1);
+
+    // Dispose
+    disposeLspManager();
+
+    // Handlers should be removed
+    expect(process.listenerCount('exit')).toBe(initialExitListeners);
+    expect(process.listenerCount('SIGINT')).toBe(initialSigintListeners);
+    expect(process.listenerCount('SIGTERM')).toBe(initialSigtermListeners);
+  });
+
+  test('should handle multiple dispose calls gracefully', () => {
+    LSPServerManager.getInstance();
+
+    // Should not throw
+    expect(() => {
+      disposeLspManager();
+      disposeLspManager();
+      disposeLspManager();
+    }).not.toThrow();
+
+    // Listener count should be back to initial
+    expect(process.listenerCount('exit')).toBe(initialExitListeners);
+  });
+
+  test('should allow re-initialization after dispose', () => {
+    // Get instance
+    LSPServerManager.getInstance();
+    expect(process.listenerCount('exit')).toBe(initialExitListeners + 1);
+
+    // Dispose
+    disposeLspManager();
+    expect(process.listenerCount('exit')).toBe(initialExitListeners);
+
+    // Get instance again
+    LSPServerManager.getInstance();
+    expect(process.listenerCount('exit')).toBe(initialExitListeners + 1);
+  });
+
+  test('dispose method should be idempotent', () => {
+    const manager = LSPServerManager.getInstance();
+
+    // Call dispose multiple times directly
+    manager.dispose();
+    manager.dispose();
+    manager.dispose();
+
+    // Should not throw and handlers should only be removed once
+    expect(process.listenerCount('exit')).toBe(initialExitListeners);
   });
 });
