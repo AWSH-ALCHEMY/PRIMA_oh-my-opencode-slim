@@ -38,36 +38,40 @@ export function createAutoUpdateCheckerHook(
 
       hasChecked = true;
 
-      setTimeout(async () => {
-        const cachedVersion = getCachedVersion();
-        const localDevVersion = getLocalDevVersion(ctx.directory);
-        const displayVersion = localDevVersion ?? cachedVersion;
+      setTimeout(() => {
+        (async () => {
+          try {
+            const cachedVersion = getCachedVersion();
+            const localDevVersion = getLocalDevVersion(ctx.directory);
+            const displayVersion = localDevVersion ?? cachedVersion;
 
-        if (localDevVersion) {
-          if (showStartupToast) {
-            showToast(
-              ctx,
-              `OMO-Slim ${displayVersion} (dev)`,
-              'Running in local development mode.',
-              'info',
-            );
+            if (localDevVersion) {
+              if (showStartupToast) {
+                showToast(
+                  ctx,
+                  `OMO-Slim ${displayVersion} (dev)`,
+                  'Running in local development mode.',
+                  'info',
+                );
+              }
+              log('[auto-update-checker] Local development mode');
+              return;
+            }
+
+            if (showStartupToast) {
+              showToast(
+                ctx,
+                `OMO-Slim ${displayVersion ?? 'unknown'}`,
+                'oh-my-opencode-slim is active.',
+                'info',
+              );
+            }
+
+            await runBackgroundUpdateCheck(ctx, autoUpdate);
+          } catch (err) {
+            log('[auto-update-checker] Error in background check:', err);
           }
-          log('[auto-update-checker] Local development mode');
-          return;
-        }
-
-        if (showStartupToast) {
-          showToast(
-            ctx,
-            `OMO-Slim ${displayVersion ?? 'unknown'}`,
-            'oh-my-opencode-slim is active.',
-            'info',
-          );
-        }
-
-        runBackgroundUpdateCheck(ctx, autoUpdate).catch((err) => {
-          log('[auto-update-checker] Background update check failed:', err);
-        });
+        })();
       }, 0);
     },
   };
